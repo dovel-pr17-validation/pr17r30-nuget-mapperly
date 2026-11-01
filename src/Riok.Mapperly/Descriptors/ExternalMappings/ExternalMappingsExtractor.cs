@@ -1,0 +1,99 @@
+using Microsoft.CodeAnalysis;
+using Riok.Mapperly.Abstractions;
+using Riok.Mapperly.Configuration;
+using Riok.Mapperly.Configuration.MethodReferences;
+using Riok.Mapperly.Descriptors.Mappings.UserMappings;
+using Riok.Mapperly.Diagnostics;
+using Riok.Mapperly.Helpers;
+
+namespace Riok.Mapperly.Descriptors.ExternalMappings;
+
+internal static class ExternalMappingsExtractor
+{
+    public static IEnumerable<IUserMapping> ExtractExternalMappings(
+        IEnumerable<UseStaticMapperConfiguration> assemblyScopedStaticMappers,
+        SimpleMappingBuilderContext ctx,
+        INamedTypeSymbol mapperSymbol
+    )
+    {
+        return ExtractExternalStaticMappings(assemblyScopedStaticMappers, ctx)
+            .Concat(ExtractExternalStaticMappings(ExtractStaticMappersFromAttributes(ctx, mapperSymbol), ctx))
+            .Concat(ExtractExternalInstanceMappings(ctx, mapperSymbol));
+    }
+
+    private static IEnumerable<UseStaticMapperConfiguration> ExtractStaticMappersFromAttributes(
+        SimpleMappingBuilderContext ctx,
+        INamedTypeSymbol mapperSymbol
+    )
+    {
+        return ctx
+            .AttributeAccessor.Access<UseStaticMapperAttribute, UseStaticMapperConfiguration>(mapperSymbol)
+            .Concat(ctx.AttributeAccessor.Access<UseStaticMapperAttribute<object>, UseStaticMapperConfiguration>(mapperSymbol));
+    }
+
+    private static IEnumerable<IUserMapping> ExtractExternalStaticMappings(
+        IEnumerable<UseStaticMapperConfiguration> staticMappers,
+        SimpleMappingBuilderContext ctx
+    )
+    {
+        var staticExternalMappers = staticMappers.SelectMany(x =>
+            UserMethodMappingExtractor.ExtractUserImplementedMappings(
+                ctx,
+                x.MapperType,
+                receiver: x.MapperType.FullyQualifiedIdentifierName(),
+                isStatic: true,
+                isExternal: true
+            )
+        );
+        return staticExternalMappers;
+    }
+
+    private static IEnumerable<IUserMapping> ExtractExternalInstanceMappings(SimpleMappingBuilderContext ctx, INamedTypeSymbol mapperSymbol)
+    {
+        return ctx
+            .SymbolAccessor.GetAllMembers(mapperSymbol)
+            .Where(x => ctx.AttributeAccessor.HasAttribute<UseMapperAttribute>(x))
+            .SelectMany(x => ValidateAndExtractExternalInstanceMappings(ctx, x));
+    }
+
+    public static IEnumerable<(string Name, IUserMapping Mapping)> ExtractExternalNamedMappings(
+        SimpleMappingBuilderContext ctx,
+        INamedTypeSymbol mapperSymbol
+    )
+    {
+        return ctx
+            .SymbolAccessor.GetAllMethods(mapperSymbol)
+            .SelectMany(CollectMemberMappingConfigurations)
+            .SelectMany(e => UserMethodMappingExtractor.ExtractNamedUserImplementedMappings(ctx, e).Select(y => (e.FullName, y)));
+
+        IEnumerable<IMethodReferenceConfiguration> CollectMemberMappingConfigurations(IMethodSymbol x) =>
+            ctx
+                .AttributeAccessor.Access<MapPropertyAttribute, MemberMappingConfiguration>(x)
+                .Select(e => e.Use)
+                .Concat(ctx.AttributeAccessor.Access<MapPropertyFromSourceAttribute, MemberMappingConfiguration>(x).Select(e => e.Use))
+                .Concat(
+                    ctx.AttributeAccessor.Access<IncludeMappingConfigurationAttribute, IncludeMappingConfiguration>(x).Select(e => e.Name)
+                )
+                .Where(e => e?.IsExternal ?? false)
+                .WhereNotNull();
+    }
+
+    private static IEnumerable<IUserMapping> ValidateAndExtractExternalInstanceMappings(SimpleMappingBuilderContext ctx, ISymbol symbol)
+    {
+        var (name, type, nullableAnnotation) = symbol switch
+        {
+            IFieldSymbol field => (field.Name, field.Type, field.NullableAnnotation),
+            IPropertySymbol prop => (prop.Name, prop.Type, prop.NullableAnnotation),
+            _ => (string.Empty, null, NullableAnnotation.None),
+        };
+
+        if (type == null)
+            return [];
+
+        if (nullableAnnotation != NullableAnnotation.Annotated)
+            return UserMethodMappingExtractor.ExtractUserImplementedMappings(ctx, type, name, isStatic: false, isExternal: true);
+
+        ctx.ReportDiagnostic(DiagnosticDescriptors.ExternalMapperMemberCannotBeNullable, symbol, symbol.ToDisplayString());
+        return [];
+    }
+}

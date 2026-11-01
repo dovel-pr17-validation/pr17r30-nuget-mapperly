@@ -1,0 +1,28 @@
+<Project>
+  <PropertyGroup>
+    <DefineConstants Condition="'$(MapperlyAbstractionsScope)' == 'runtime'"
+      >$(DefineConstants);MAPPERLY_ABSTRACTIONS_SCOPE_RUNTIME</DefineConstants>
+  </PropertyGroup>
+
+  <ItemGroup>
+    <CompilerVisibleProperty Include="MapperlyPropertyNameMappingStrategy" />
+    <CompilerVisibleProperty Include="MapperlyEnumMappingStrategy" />
+    <CompilerVisibleProperty Include="MapperlyEnumNamingStrategy" />
+    <CompilerVisibleProperty Include="MapperlyEnumMappingIgnoreCase" />
+    <CompilerVisibleProperty Include="MapperlyThrowOnMappingNullMismatch" />
+    <CompilerVisibleProperty Include="MapperlyThrowOnPropertyMappingNullMismatch" />
+    <CompilerVisibleProperty Include="MapperlyAllowNullPropertyAssignment" />
+    <CompilerVisibleProperty Include="MapperlyUseDeepCloning" />
+    <CompilerVisibleProperty Include="MapperlyStackCloningStrategy" />
+    <CompilerVisibleProperty Include="MapperlyEnabledConversions" />
+    <CompilerVisibleProperty Include="MapperlyUseReferenceHandling" />
+    <CompilerVisibleProperty Include="MapperlyIgnoreObsoleteMembersStrategy" />
+    <CompilerVisibleProperty Include="MapperlyRequiredMappingStrategy" />
+    <CompilerVisibleProperty Include="MapperlyRequiredEnumMappingStrategy" />
+    <CompilerVisibleProperty Include="MapperlyIncludedMembers" />
+    <CompilerVisibleProperty Include="MapperlyIncludedConstructors" />
+    <CompilerVisibleProperty Include="MapperlyPreferParameterlessConstructors" />
+    <CompilerVisibleProperty Include="MapperlyAutoUserMappings" />
+    <CompilerVisibleProperty Include="MapperlyQueryableProjectionNullHandling" />
+  </ItemGroup>
+</Project>

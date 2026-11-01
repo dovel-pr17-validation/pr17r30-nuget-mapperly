@@ -1,0 +1,224 @@
+using System.Diagnostics.CodeAnalysis;
+using Microsoft.CodeAnalysis;
+using Riok.Mapperly.Abstractions;
+using Riok.Mapperly.Abstractions.ReferenceHandling;
+using Riok.Mapperly.Diagnostics;
+using Riok.Mapperly.Symbols;
+
+namespace Riok.Mapperly.Descriptors;
+
+internal static class UserMappingMethodParameterExtractor
+{
+    public static bool BuildParameters(
+        SimpleMappingBuilderContext ctx,
+        IMethodSymbol method,
+        [NotNullWhen(true)] out MappingMethodParameters? parameters
+    )
+    {
+        var matchedParameterOrdinals = new HashSet<int>();
+
+        var refHandlerParameter = FindReferenceHandlerParameter(ctx, method);
+        matchedParameterOrdinals.Add(refHandlerParameter?.Ordinal ?? -1);
+
+        var targetOriginalValueParameter = FindTargetOriginalValueParameter(ctx, method, matchedParameterOrdinals);
+        matchedParameterOrdinals.Add(targetOriginalValueParameter?.Ordinal ?? -1);
+
+        var sourceParameter = FindSourceParameter(ctx, method, matchedParameterOrdinals);
+        matchedParameterOrdinals.Add(sourceParameter?.Ordinal ?? -1);
+        if (!sourceParameter.HasValue)
+        {
+            parameters = null;
+            return false;
+        }
+
+        // If the method returns void, a target parameter is required
+        // if the method doesn't return void, a target parameter is not allowed.
+        MethodParameter? targetParameter = null;
+        if (method.ReturnsVoid)
+        {
+            targetParameter = FindTargetParameter(ctx, method, matchedParameterOrdinals);
+            matchedParameterOrdinals.Add(targetParameter?.Ordinal ?? -1);
+            if (!targetParameter.HasValue)
+            {
+                parameters = null;
+                return false;
+            }
+        }
+
+        var additionalParameterSymbols = method.Parameters.Where(p => !matchedParameterOrdinals.Contains(p.Ordinal)).ToList();
+        // additional parameters should not be attributed as target or ref handler
+        var hasInvalidAdditionalParameter = additionalParameterSymbols.Exists(p =>
+            p.Type.TypeKind is TypeKind.TypeParameter or TypeKind.Error
+            || ctx.SymbolAccessor.HasAttribute<ReferenceHandlerAttribute>(p)
+            || ctx.SymbolAccessor.HasAttribute<MappingTargetAttribute>(p)
+            || ctx.SymbolAccessor.HasAttribute<MappingTargetOriginalValueAttribute>(p)
+        );
+        if (hasInvalidAdditionalParameter)
+        {
+            parameters = null;
+            return false;
+        }
+
+        var additionalParameters = additionalParameterSymbols.Select(p => ctx.SymbolAccessor.WrapMethodParameter(p)).ToList();
+
+        // detect and deduplicate case-insensitive duplicate additional parameter names (e.g., int UserId, int userId)
+        var parameterGroups = additionalParameters.ToLookup(p => p.NormalizedName, StringComparer.OrdinalIgnoreCase);
+        foreach (var group in parameterGroups.Where(g => g.Skip(1).Any()))
+        {
+            ctx.ReportDiagnostic(
+                DiagnosticDescriptors.DuplicateAdditionalParameterCaseInsensitive,
+                method,
+                string.Join(", ", group.Select(p => p.Name))
+            );
+        }
+
+        var dedupedAdditionalParameters = parameterGroups.Select(g => g.First()).ToList();
+        parameters = new MappingMethodParameters(
+            sourceParameter.Value,
+            targetParameter,
+            refHandlerParameter,
+            targetOriginalValueParameter,
+            dedupedAdditionalParameters
+        );
+        return true;
+    }
+
+    public static bool BuildRuntimeTargetTypeMappingParameters(
+        SimpleMappingBuilderContext ctx,
+        IMethodSymbol method,
+        [NotNullWhen(true)] out RuntimeTargetTypeMappingMethodParameters? parameters
+    )
+    {
+        // existing target instance runtime typed mappings are not supported
+        if (method.ReturnsVoid)
+        {
+            parameters = null;
+            return false;
+        }
+
+        // the source and target type param is always required
+        // and runtime target type mappings do not support additional parameters
+        var expectedParameterCount = 2;
+
+        var matchedParameterOrdinals = new HashSet<int>();
+
+        var refHandlerParameter = FindReferenceHandlerParameter(ctx, method);
+        matchedParameterOrdinals.Add(refHandlerParameter?.Ordinal ?? -1);
+        if (refHandlerParameter.HasValue)
+        {
+            expectedParameterCount++;
+        }
+
+        var sourceParameter = FindSourceParameter(ctx, method, matchedParameterOrdinals);
+        matchedParameterOrdinals.Add(sourceParameter?.Ordinal ?? -1);
+        if (!sourceParameter.HasValue)
+        {
+            parameters = null;
+            return false;
+        }
+
+        // the target type param needs to exist
+        // and needs to be of type System.Type
+        var targetTypeParameter = FindTargetParameter(ctx, method, matchedParameterOrdinals);
+        if (!targetTypeParameter.HasValue || !SymbolEqualityComparer.Default.Equals(targetTypeParameter.Value.Type, ctx.Types.Get<Type>()))
+        {
+            parameters = null;
+            return false;
+        }
+
+        if (method.Parameters.Length != expectedParameterCount)
+        {
+            parameters = null;
+            return false;
+        }
+
+        parameters = new RuntimeTargetTypeMappingMethodParameters(sourceParameter.Value, targetTypeParameter.Value, refHandlerParameter);
+        return true;
+    }
+
+    private static MethodParameter? FindSourceParameter(
+        SimpleMappingBuilderContext ctx,
+        IMethodSymbol method,
+        HashSet<int> existingMatchedParameterOrdinals
+    )
+    {
+        // source parameter is the first not-yet-matched parameter not annotated as mapping target
+        var sourceParameterSymbol = method.Parameters.FirstOrDefault(p =>
+            !existingMatchedParameterOrdinals.Contains(p.Ordinal) && !ctx.SymbolAccessor.HasAttribute<MappingTargetAttribute>(p)
+        );
+        return ctx.SymbolAccessor.WrapOptionalMethodParameter(sourceParameterSymbol);
+    }
+
+    private static MethodParameter? FindTargetParameter(
+        SimpleMappingBuilderContext ctx,
+        IMethodSymbol method,
+        HashSet<int> existingMatchedParameterOrdinals
+    )
+    {
+        // The target parameter is the first parameter,
+        // which is not the source parameter,
+        // and is not annotated as reference handling parameter.
+        // It may be annotated as mapping target
+        // (for example, if it is the very first parameter, which is often the case in extension methods).
+        var targetParameterSymbol = method.Parameters.FirstOrDefault(p =>
+            !existingMatchedParameterOrdinals.Contains(p.Ordinal) && !ctx.SymbolAccessor.HasAttribute<ReferenceHandlerAttribute>(p)
+        );
+        return ctx.SymbolAccessor.WrapOptionalMethodParameter(targetParameterSymbol);
+    }
+
+    private static MethodParameter? FindTargetOriginalValueParameter(
+        SimpleMappingBuilderContext ctx,
+        IMethodSymbol method,
+        HashSet<int> existingMatchedParameterOrdinals
+    )
+    {
+        var candidates = method
+            .Parameters.Where(p =>
+                !existingMatchedParameterOrdinals.Contains(p.Ordinal)
+                && ctx.SymbolAccessor.HasAttribute<MappingTargetOriginalValueAttribute>(p)
+            )
+            .ToList();
+
+        return candidates.FirstOrDefault() is { } parameter ? ctx.SymbolAccessor.WrapOptionalMethodParameter(parameter) : null;
+    }
+
+    private static MethodParameter? FindReferenceHandlerParameter(SimpleMappingBuilderContext ctx, IMethodSymbol method)
+    {
+        var refHandlerParameterSymbol = method.Parameters.FirstOrDefault(p =>
+            ctx.SymbolAccessor.HasAttribute<ReferenceHandlerAttribute>(p)
+        );
+        if (refHandlerParameterSymbol == null)
+            return null;
+
+        // the reference handler parameter cannot also be the target parameter
+        if (ctx.SymbolAccessor.HasAttribute<MappingTargetAttribute>(refHandlerParameterSymbol))
+        {
+            ctx.ReportDiagnostic(DiagnosticDescriptors.UnsupportedMappingMethodSignature, method, method.Name);
+        }
+
+        var refHandlerParameter = ctx.SymbolAccessor.WrapMethodParameter(refHandlerParameterSymbol);
+        if (!SymbolEqualityComparer.Default.Equals(ctx.Types.Get<IReferenceHandler>(), refHandlerParameter.Type))
+        {
+            ctx.ReportDiagnostic(
+                DiagnosticDescriptors.ReferenceHandlerParameterWrongType,
+                refHandlerParameterSymbol,
+                method.ContainingType.ToDisplayString(),
+                method.Name,
+                ctx.Types.Get<IReferenceHandler>().ToDisplayString(),
+                refHandlerParameterSymbol.Type.ToDisplayString()
+            );
+        }
+
+        if (!ctx.Configuration.Mapper.UseReferenceHandling)
+        {
+            ctx.ReportDiagnostic(
+                DiagnosticDescriptors.ReferenceHandlingNotEnabled,
+                refHandlerParameterSymbol,
+                method.ContainingType.ToDisplayString(),
+                method.Name
+            );
+        }
+
+        return refHandlerParameter;
+    }
+}
